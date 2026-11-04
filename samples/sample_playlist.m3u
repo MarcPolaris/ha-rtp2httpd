@@ -1,0 +1,14 @@
+# 安徽电信风格示例：rtp2httpd 转换后的播放列表（含 FCC / catchup / $label）
+#EXTM3U x-tvg-url="http://192.168.2.2:5140/epg.xml.gz"
+#EXTINF:-1 tvg-id="CCTV1" tvg-name="CCTV-1" tvg-logo="http://192.168.2.2:5140/logo/CCTV1.png" group-title="央视" catchup="default" catchup-source="http://192.168.2.2:5140/CCTV-1/catchup?playseek={utc:YmdHMS}-{utcend:YmdHMS}",CCTV-1
+http://192.168.2.2:5140/CCTV/CCTV-1
+#EXTINF:-1 tvg-id="CCTV2" tvg-name="CCTV-2" group-title="央视",CCTV-2
+http://192.168.2.2:5140/CCTV/CCTV-2
+#EXTINF:-1 tvg-id="安徽卫视" group-title="安徽",安徽卫视
+http://192.168.2.2:5140/Anhui/安徽卫视
+#EXTINF:-1 group-title="广东" catchup="append" catchup-source="http://192.168.2.2:5140/Satellite/Guangdong TV/catchup?starttime=${(b)yyyyMMdd|UTC}T${(b)HHmmss|UTC}&endtime=${(e)yyyyMMdd|UTC}T${(e)HHmmss|UTC}",广东卫视
+http://192.168.2.2:5140/Satellite/Guangdong TV/HD$HD
+http://192.168.2.2:5140/Satellite/Guangdong TV/SD$SD
+#EXTGRP:高清
+#EXTINF:-1 tvg-id="湖南卫视",湖南卫视
+http://192.168.2.2:5140/Hunan/湖南卫视?fcc=10.255.14.152:15970&fcc-type=telecom

@@ -1,0 +1,13 @@
+{
+  "domain": "rtp2httpd",
+  "name": "rtp2httpd",
+  "codeowners": ["@marcpolaris"],
+  "config_flow": true,
+  "dependencies": ["stream"],
+  "documentation": "https://github.com/MarcPolaris/ha-rtp2httpd",
+  "issue_tracker": "https://github.com/MarcPolaris/ha-rtp2httpd/issues",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "version": "1.3.0"
+}

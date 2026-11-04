@@ -1,0 +1,61 @@
+{
+  "config": {
+    "flow_title": "rtp2httpd",
+    "step": {
+      "user": {
+        "title": "rtp2httpd 连接设置",
+        "description": "填写 iStoreOS/OpenWrt 旁路由上 rtp2httpd 的访问地址（如 192.168.2.2）。",
+        "data": {
+          "name": "实例名称",
+          "host": "rtp2httpd 地址（IP 或域名）",
+          "port": "端口",
+          "token": "r2h-token（若已配置）"
+        }
+      },
+      "channels": {
+        "title": "选择频道",
+        "description": "共发现 {count} 个频道，勾选需要导入的频道（默认全选；媒体播放器/摄像头实体默认不创建，可在选项里开启）。",
+        "data": {
+          "channels": "频道"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接 rtp2httpd，请检查地址、端口与网络",
+      "invalid_token": "r2h-token 无效或未授权（HTTP 401/403）",
+      "no_channels": "未发现频道，请确认 rtp2httpd 已配置 M3U"
+    },
+    "abort": {
+      "already_configured": "该 rtp2httpd 实例已配置"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "rtp2httpd 选项",
+        "description": "地址默认自动生成；改动后保存即自动重载生效。勾选「重新选择频道」可重拉列表并调整频道范围。",
+        "data": {
+          "playlist_url": "播放列表 URL（默认 /playlist.m3u）",
+          "status_url": "状态地址（默认 /status/sse）",
+          "refresh_interval": "频道列表刷新间隔（秒）",
+          "status_interval": "状态轮询间隔（秒）",
+          "create_media_players": "创建媒体播放器实体（每个频道一个）",
+          "create_cameras": "创建摄像头实体（面板内看直播）",
+          "use_snapshot": "摄像头缩略图使用 rtp2httpd 截图（需服务端 ffmpeg）",
+          "reselect_channels": "重新选择频道"
+        }
+      },
+      "select_channels": {
+        "title": "重新选择频道",
+        "description": "共发现 {count} 个频道，勾选需要导入的频道。",
+        "data": {
+          "channels": "频道"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接 rtp2httpd，请检查播放列表 URL",
+      "invalid_token": "r2h-token 无效或未授权（HTTP 401/403）"
+    }
+  }
+}
