@@ -220,6 +220,10 @@ class Rtp2httpdOptionsFlow(OptionsFlow):
                     default=val(CONF_STATUS_URL, default_s_url),
                 ): str,
                 vol.Optional(
+                    CONF_CHANNEL_MAP_URL,
+                    default=val(CONF_CHANNEL_MAP_URL, ""),
+                ): str,
+                vol.Optional(
                     CONF_REFRESH_INTERVAL,
                     default=val(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL),
                 ): cv.positive_int,
@@ -241,10 +245,6 @@ class Rtp2httpdOptionsFlow(OptionsFlow):
                     CONF_USE_SNAPSHOT,
                     default=val(CONF_USE_SNAPSHOT, DEFAULT_USE_SNAPSHOT),
                 ): bool,
-                vol.Optional(
-                    CONF_CHANNEL_MAP_URL,
-                    default=val(CONF_CHANNEL_MAP_URL, ""),
-                ): str,
                 vol.Optional("reselect_channels", default=False): bool,
             }
         )
