@@ -3,7 +3,8 @@
 核心能力（对应 /status 页面与 /status/api/* 接口）：
 - 服务状态：版本 / 运行时长 / 日志级别 / worker 明细（sensor）
 - 实时连接统计：在线客户端数 / 总带宽 / 累计流量（sensor）
-- 接入设备：每个客户端动态生成「状态传感器 + 断开按钮」（sensor/button）
+- 接入设备：每个客户端动态生成「状态传感器 + 频道传感器 + 断开按钮」
+  （不再提供「连接开关」：状态与客户端传感器重复，关闭即断开、实体随即删除，形同虚设）
 - 控制：重载配置 / 重启工作进程 / 清空日志（button）、日志级别（select）
 - 可选频道实体：media_player（逻辑播放器）/ camera（面板内看直播，走 stream）
 
@@ -43,7 +44,7 @@ _LOGGER = logging.getLogger(__name__)
 def _enabled_platforms(entry: ConfigEntry) -> list[str]:
     """根据选项决定装载的平台。"""
     options = entry.options
-    platforms: list[str] = ["sensor", "binary_sensor", "button", "switch", "select"]
+    platforms: list[str] = ["sensor", "binary_sensor", "button", "select"]
     if options.get(CONF_CREATE_MEDIA_PLAYERS, DEFAULT_CREATE_MEDIA_PLAYERS):
         platforms.append("media_player")
     if options.get(CONF_CREATE_CAMERAS, DEFAULT_CREATE_CAMERAS):

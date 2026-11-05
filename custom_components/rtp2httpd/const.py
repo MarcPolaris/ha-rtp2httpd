@@ -18,7 +18,6 @@ PLATFORMS = [
     "sensor",
     "binary_sensor",
     "button",
-    "switch",
     "select",
 ]
 

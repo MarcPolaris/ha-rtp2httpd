@@ -20,11 +20,9 @@ IPTV 转发服务器，[stackia/rtp2httpd](https://github.com/stackia/rtp2httpd)
 | sensor | `在线客户端数` | 当前正在播放的流会话数量 |
 | sensor | `当前总带宽` | 所有客户端推流带宽合计（**Mbps**，属性保留 MB/s 显示） |
 | sensor | `累计流量` | 服务启动以来发送总量（**GB**，属性含易读格式与原始字节） |
-| sensor | `当前播放频道` | 无人播放 `未播放`；单个客户端显示台名；多个客户端显示 `同时播放 N 个频道`（明细见属性 `sessions`：客户端、组播地址、已播时长、带宽、台标、tvg-id） |
 | sensor | `客户端 <IP>`（动态） | 每个接入设备一个：状态（推流中/连接中/…）、频道、带宽、队列、丢包 |
 | sensor | `客户端 <IP> 频道`（动态） | 每个接入设备一个：该设备正在播放的频道名 |
 | binary_sensor | `服务在线` | 一直可用，适合做掉线自动化（binary_sensor 的 on/off） |
-| switch | `连接 <IP>`（动态） | 每个客户端一个：开=传输中，**关闭即强制断开** |
 | button | `重载配置` / `重启工作进程` / `清空日志` | 等效 SIGHUP / SIGUSR1 / 清日志 |
 | button | `断开 <IP>`（动态） | 强制断开某个客户端（该 IP 会被封禁 5 秒） |
 | select | `日志级别` | 致命(0)~调试(4) 运行时调整，立即生效 |
@@ -74,7 +72,7 @@ IPTV 转发服务器，[stackia/rtp2httpd](https://github.com/stackia/rtp2httpd)
 | 创建媒体播放器实体 | 关 | 每个频道一个 media_player |
 | 创建摄像头实体 | 关 | 每个频道一个 camera（面板内看直播） |
 | 摄像头截图 | 关 | 缩略图走 `?snapshot=1`，**需 rtp2httpd 配置 ffmpeg-path**，OpenWrt 上 CPU 开销大，建议频道多时保持关闭 |
-| 频道名称来源 | 空 | 一份**含 `rtp://` / `udp://` 原始组播地址**的 M3U，用于把播放中的 `/rtp/238.1.78.210:7552` 反查成频道名。填了「当前播放频道」才显示台名，留空则只显示组播地址。**只在启动时读取一次**（映射表存内存，不落盘、无后台轮询），改完列表后重新保存选项即可重建 |
+| 频道名称来源 | 空 | 一份**含 `rtp://` / `udp://` 原始组播地址**的 M3U，用于把播放中的 `/rtp/238.1.78.210:7552` 反查成频道名。填了「客户端 <IP> 频道」才显示台名，留空则只显示组播地址。**只在启动时读取一次**（映射表存内存，不落盘、无后台轮询），改完列表后重新保存选项即可重建 |
 
 > 「频道名称来源」和「播放列表 URL」不是一回事：`/playlist.m3u` 是 rtp2httpd
 > **转换后**的列表（地址已被改写成 `/分组/频道名`），拿不到组播地址；要反查频道名
@@ -126,50 +124,6 @@ action:
 
 暴露 `media_player.rtp2httpd_cctv_1` 等实体到 Assist，别名设为频道名，
 即可语音"播放中央一台"。
-
-### 语音查询「电视在看什么台」
-
-`sensor.rtp2httpd_dang_qian_bo_fang_pin_dao`（`当前播放频道`）的 state：
-
-- 没人在看 → `未播放`
-- 只有一个客户端 → 频道名，如 `枞阳电视台`
-- 多个客户端 → `同时播放 N 个频道`（不猜主次，明细在属性 `sessions` 里）
-
-1. 设置 → 语音助手 → 暴露 → 勾选该实体
-2. 给实体加别名（设置 → 实体 → 当前播放频道 → 别名）：`电视`、`电视在看什么`、`频道`
-3. 之后问「电视在看什么台」即可得到播报
-
-属性结构（模板 / 自动化可直接取）：
-
-```yaml
-# 属性示例
-client_count: 1
-multicast: "238.1.78.210:7552"      # 主会话的组播地址
-channel: "枞阳电视台"
-client_addr: "192.168.2.100:60456"
-duration: "1h 6m 23s"
-duration_seconds: 3983
-service_url: "/rtp/238.1.78.210:7552?fcc=117.71.18.200:15970"
-sessions:                            # 多客户端时全部列出（按时长倒序）
-  - client_addr: "192.168.2.100:60456"
-    channel: "枞阳电视台"
-    multicast: "238.1.78.210:7552"
-    duration: "1h 6m 23s"
-    bandwidth: 2.6                   # Mbps
-```
-
-常见自动化：根据频道切换场景
-
-```yaml
-trigger:
-  - platform: state
-    entity_id: sensor.rtp2httpd_dang_qian_bo_fang_pin_dao
-    to: "CCTV-5 体育"
-action:
-  - service: light.turn_on
-    target:
-      entity_id: light.living_room
-```
 
 ## 五、控制接口对照（rtp2httpd 原生）
 
@@ -229,7 +183,6 @@ custom_components/rtp2httpd/
 ├── status.py          状态 SSE 解析与控制 API 封装
 ├── sensor.py          状态/客户端传感器（动态实体）
 ├── binary_sensor.py   服务在线二进制传感器
-├── switch.py          客户端连接开关（动态实体）
 ├── button.py          控制与断开按钮（动态实体）
 ├── select.py          日志级别选择
 ├── registry_utils.py  断开客户端时清理残留实体注册条目

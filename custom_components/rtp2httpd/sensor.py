@@ -6,7 +6,10 @@
 - 在线客户端数 / 当前总带宽 / 累计发送字节
 
 动态传感器（随客户端连入/断开自动增删）：
-- 每个客户端一个：状态文本 + 频道/流量/队列/丢包等属性
+- 每个客户端两个：连接状态（属性含频道/组播地址/时长/流量/队列/丢包）、正在播放的频道
+
+不再提供全局「当前播放频道」：多客户端时无法用一个值准确表达，
+各客户端的频道看「客户端 <IP> 频道」即可。
 
 注意：实体类必须继承 SensorEntity（此前豆包版本基类漏掉了它，
 导致实体加入 sensor 平台后 state 恒为 None → HA 显示「未知」）。
@@ -190,7 +193,6 @@ async def async_setup_entry(
 
     # 静态传感器（「服务在线」二进制传感器在 binary_sensor.py 平台）
     static_entities = [
-        Rtp2httpdNowPlayingSensor(coordinator, entry),
         Rtp2httpdServiceSensor(coordinator, entry),
         Rtp2httpdUptimeSensor(coordinator, entry),
         Rtp2httpdMaxClientsSensor(coordinator, entry),
@@ -300,92 +302,6 @@ class _Rtp2httpdStatusEntity(CoordinatorEntity[StatusCoordinator], SensorEntity)
         # 轮询失败时协调器保留最后成功数据；只要最近一次轮询成功即视为可用。
         # （数据非实时时由「服务状态」传感器呈现离线，这里不需要全部变不可用）
         return self.coordinator.last_update_success
-
-
-class Rtp2httpdNowPlayingSensor(_Rtp2httpdStatusEntity):
-    """当前正在播放的频道。
-
-    状态语义（避免多客户端时误导）：
-    - 无人播放       -> `未播放`
-    - 只有 1 个客户端 -> 频道名，如 `枞阳电视台`（查不到台名时显示组播地址）
-    - 多个客户端     -> `同时播放 N 个频道`，具体台名看属性 `sessions`
-
-    频道名需要配置「频道名称来源」（含 rtp:// 组播地址的原始 M3U）才能反查。
-    """
-
-    _attr_icon = "mdi:television-classic"
-
-    def __init__(
-        self, coordinator: StatusCoordinator, entry: ConfigEntry
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = _uid(entry.entry_id, "now_playing")
-        self._attr_name = "当前播放频道"
-
-    # ---- 内部 ----
-    def _index(self) -> dict[str, Channel]:
-        return _channel_index(self.coordinator.hass, self._entry)
-
-    def _compute_native_value(self) -> str:
-        clients = list(self.coordinator.data.clients or [])
-        if not clients:
-            return "未播放"
-        # 多客户端时不给单一频道名，避免误导（明细看属性里的 sessions）
-        if len(clients) > 1:
-            return f"同时播放 {len(clients)} 个频道"
-        label, _ = _channel_label(self._index(), clients[0].service_url)
-        return label
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        index = self._index()
-        clients = sorted(
-            self.coordinator.data.clients or [],
-            key=lambda c: (c.duration_ms or 0, c.bandwidth or 0),
-            reverse=True,
-        )
-        sessions: list[dict[str, Any]] = []
-        for client in clients:
-            label, channel = _channel_label(index, client.service_url)
-            sessions.append(
-                {
-                    ATTR_CLIENT_ADDR: client.addr,
-                    ATTR_CHANNEL: label,
-                    ATTR_MULTICAST: stream_key(client.service_url),
-                    ATTR_SERVICE_URL: client.service_url,
-                    ATTR_CHANNEL_GROUP: channel.group if channel else None,
-                    ATTR_CHANNEL_TVG_ID: channel.tvg_id if channel else None,
-                    ATTR_CHANNEL_LOGO: channel.logo if channel else None,
-                    ATTR_DURATION: _fmt_duration(client.duration_ms),
-                    ATTR_DURATION_SECONDS: (client.duration_ms or 0) // 1000,
-                    ATTR_BANDWIDTH: round(
-                        (client.bandwidth or 0) * 8 / 1_000_000, 2
-                    ),
-                }
-            )
-        attrs: dict[str, Any] = {
-            "client_count": len(sessions),
-            "sessions": sessions,
-        }
-        if sessions:
-            # 主会话平铺一份，方便模板/语音直接引用
-            primary = sessions[0]
-            for key in (
-                ATTR_CLIENT_ADDR,
-                ATTR_CHANNEL,
-                ATTR_MULTICAST,
-                ATTR_SERVICE_URL,
-                ATTR_DURATION,
-                ATTR_DURATION_SECONDS,
-            ):
-                attrs[key] = primary[key]
-        if not index:
-            attrs["hint"] = (
-                "未配置「频道名称来源」：当前只能显示组播地址。"
-                "在集成选项里填入含 rtp:// 地址的原始 M3U（如 http://192.168.2.2/iptv.m3u）"
-                "即可显示频道名。"
-            )
-        return attrs
 
 
 class Rtp2httpdServiceSensor(_Rtp2httpdStatusEntity):
