@@ -81,6 +81,7 @@ class ClientStatus:
     addr: str
     service_url: str
     state: int = 0
+    duration_ms: int = 0
     bytes_sent: int = 0
     bandwidth: int = 0          # 单位 B/s（rtp2httpd 未公开文档说明，按字节/秒处理）
     queue_bytes: int = 0
@@ -176,6 +177,7 @@ def parse_status(text: str) -> ServerStatus:
                 addr=str(item.get("clientAddr", "")),
                 service_url=str(item.get("serviceUrl", "")),
                 state=_as_int(item.get("state"), 0),
+                duration_ms=_as_int(item.get("durationMs"), 0),
                 bytes_sent=_as_int(item.get("bytesSent"), 0),
                 bandwidth=_as_int(item.get("currentBandwidth"), 0),
                 queue_bytes=_as_int(item.get("queueBytes"), 0),

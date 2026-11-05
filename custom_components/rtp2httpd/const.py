@@ -31,6 +31,7 @@ CONF_CREATE_MEDIA_PLAYERS = "create_media_players"
 CONF_CREATE_CAMERAS = "create_cameras"
 CONF_USE_SNAPSHOT = "use_snapshot"
 CONF_CHANNELS = "channels"
+CONF_CHANNEL_MAP_URL = "channel_map_url"           # 原始 M3U（含 rtp:// 地址）用于反查频道名
 
 # ---- 默认值 ----
 DEFAULT_PORT = 5140
@@ -78,6 +79,14 @@ ATTR_QUEUE_LIMIT = "queue_limit_bytes"
 ATTR_QUEUE_HIGHWATER = "queue_highwater_bytes"
 ATTR_DROPPED_BYTES = "dropped_bytes"
 ATTR_SLOW = "slow"
+ATTR_CHANNEL = "channel"                 # 反查到的频道名
+ATTR_MULTICAST = "multicast"             # 组播/单播地址 host:port
+ATTR_CHANNEL_GROUP = "channel_group"
+ATTR_CHANNEL_LOGO = "channel_logo"
+ATTR_CHANNEL_TVG_ID = "channel_tvg_id"
+ATTR_DURATION = "duration"               # 本次连接已持续时长（12h 24m 56s）
+ATTR_DURATION_SECONDS = "duration_seconds"
+ATTR_PLAYING_SECONDS = "playing_seconds"
 
 # ---- 日志级别选项（rtp2httpd: 0=FATAL..4=DEBUG）----
 LOG_LEVELS = {

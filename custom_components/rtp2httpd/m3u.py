@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 _ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
 _URL_PREFIXES = ("rtp://", "udp://", "rtsp://", "http://", "https://")
+
+# 从 URL 中提取流地址：/rtp/<addr:port> 或 rtp://<addr:port> / udp://@<addr:port>
+_PROXY_STREAM_RE = re.compile(r"/(?:rtp|udp|rtsp)/([^/]+)$", re.I)
+_DIRECT_STREAM_RE = re.compile(r"^(?:rtp|udp|rtsp)://@?([^/]+?)/?$", re.I)
 
 
 @dataclass
@@ -127,3 +131,61 @@ def parse_playlist(text: str, token: str | None = None) -> list[Channel]:
             seen.add(ch.key)
             result.append(ch)
     return result
+
+
+def _strip_query(url: str) -> str:
+    return url.split("#", 1)[0].split("?", 1)[0].strip()
+
+
+def stream_key(url: str) -> str | None:
+    """提取播放地址里的流标识（组播/单播地址 host:port）。
+
+    rtp2httpd 状态里上报的 serviceUrl 形如 `/rtp/238.1.78.210:7552?fcc=...`，
+    而原始 M3U 里写的是 `/rtp/238.1.78.210:7552?fcc=...`、`rtp://238.1.78.210:7552`
+    或 `udp://@238.1.78.210:7552`——统一归一化成 `238.1.78.210:7552` 才能对上。
+    """
+    if not url:
+        return None
+    path = _strip_query(url)
+    match = _PROXY_STREAM_RE.search(path)
+    if match:
+        target = match.group(1)
+    else:
+        direct = _DIRECT_STREAM_RE.match(path)
+        if not direct:
+            return None
+        target = direct.group(1)
+    target = target.strip().rstrip("/").lower()
+    return target or None
+
+
+def path_key(url: str) -> str | None:
+    """提取 URL 路径（解码 + 小写），用于匹配 `/<分组>/<频道名>` 形式的请求。"""
+    if not url:
+        return None
+    try:
+        path = unquote(urlsplit(url).path)
+    except ValueError:
+        return None
+    path = path.strip().rstrip("/").lower()
+    return path or None
+
+
+def build_channel_index(channels: list[Channel]) -> dict[str, Channel]:
+    """建立「流地址 / 路径 -> 频道」索引，供播放状态反查频道名。"""
+    index: dict[str, Channel] = {}
+    for ch in channels:
+        for key in (stream_key(ch.url), path_key(ch.url)):
+            if key and key not in index:
+                index[key] = ch
+    return index
+
+
+def lookup_channel(index: dict[str, Channel], service_url: str) -> Channel | None:
+    """按 rtp2httpd 上报的 serviceUrl 反查频道（先按流地址，再按路径）。"""
+    if not index or not service_url:
+        return None
+    for key in (stream_key(service_url), path_key(service_url)):
+        if key and key in index:
+            return index[key]
+    return None

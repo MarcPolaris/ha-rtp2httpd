@@ -36,11 +36,19 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     ATTR_BANDWIDTH,
     ATTR_BYTES_SENT,
+    ATTR_CHANNEL,
+    ATTR_CHANNEL_GROUP,
+    ATTR_CHANNEL_LOGO,
+    ATTR_CHANNEL_TVG_ID,
     ATTR_CLIENT_ADDR,
     ATTR_CLIENT_ID,
     ATTR_DROPPED_BYTES,
+    ATTR_DURATION,
+    ATTR_DURATION_SECONDS,
     ATTR_LOG_LEVEL,
     ATTR_MAX_CLIENTS,
+    ATTR_MULTICAST,
+    ATTR_PLAYING_SECONDS,
     ATTR_QUEUE_BYTES,
     ATTR_QUEUE_HIGHWATER,
     ATTR_QUEUE_LIMIT,
@@ -57,6 +65,7 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import StatusCoordinator
+from .m3u import Channel, lookup_channel, stream_key
 from .registry_utils import purge_client_entities
 from .status import ClientStatus, ServerStatus, log_level_display
 
@@ -132,6 +141,43 @@ def _fmt_bytes(value: int | None) -> str:
     return f"{value:.1f} TB"
 
 
+def _fmt_duration(duration_ms: int | None) -> str | None:
+    """毫秒 -> 12h 24m 56s（与运行时长同格式）。"""
+    if not duration_ms:
+        return "0s"
+    try:
+        seconds = int(duration_ms) // 1000
+    except (TypeError, ValueError):
+        return None
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _channel_index(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Channel]:
+    """「流地址 / 路径 -> 频道」索引；未配置「频道名称来源」时为空。"""
+    names = (hass.data.get(DOMAIN, {}).get(entry.entry_id) or {}).get(
+        "channel_names"
+    )
+    return names.index if names is not None else {}
+
+
+def _channel_label(index: dict[str, Channel], service_url: str) -> tuple[str, Channel | None]:
+    """播放地址 -> (可读名称, 频道对象)。查不到频道时退化为组播地址。"""
+    channel = lookup_channel(index, service_url)
+    if channel is not None:
+        return channel.name, channel
+    multicast = stream_key(service_url)
+    if multicast:
+        return multicast, None
+    cleaned = (service_url or "").split("?", 1)[0] or "未知"
+    return cleaned, None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -144,6 +190,7 @@ async def async_setup_entry(
 
     # 静态传感器（「服务在线」二进制传感器在 binary_sensor.py 平台）
     static_entities = [
+        Rtp2httpdNowPlayingSensor(coordinator, entry),
         Rtp2httpdServiceSensor(coordinator, entry),
         Rtp2httpdUptimeSensor(coordinator, entry),
         Rtp2httpdMaxClientsSensor(coordinator, entry),
@@ -163,21 +210,27 @@ async def async_setup_entry(
         clients = {cli.key: cli for cli in coordinator.data.clients}
         # 移除已断开的客户端：必须同时删除注册表条目，否则设备页残留"不可用"
         for ent in list(coordinator.entities[PLATFORM]):
-            if isinstance(ent, Rtp2httpdClientSensor) and ent._client_key not in clients:  # noqa: SLF001
+            if getattr(ent, "_client_key", None) is None:
+                continue
+            if ent._client_key not in clients:  # noqa: SLF001
                 coordinator.tracked[PLATFORM].discard(ent.unique_id)
                 reg.async_remove(ent.entity_id)
                 hass.async_create_task(ent.async_remove())
                 coordinator.entities[PLATFORM].remove(ent)
-        # 新增客户端
+        # 新增客户端：状态传感器 + 频道传感器
         to_add = []
         for key, cli in clients.items():
-            uid = _client_uid(entry.entry_id, key)
-            if uid in coordinator.tracked[PLATFORM]:
-                continue
-            if reg.async_get_entity_id(PLATFORM, DOMAIN, uid):
-                coordinator.tracked[PLATFORM].add(uid)
-                continue
-            to_add.append(Rtp2httpdClientSensor(coordinator, entry, cli))
+            base_uid = _client_uid(entry.entry_id, key)
+            for uid, factory in (
+                (base_uid, Rtp2httpdClientSensor),
+                (f"{base_uid}_ch", Rtp2httpdClientChannelSensor),
+            ):
+                if uid in coordinator.tracked[PLATFORM]:
+                    continue
+                if reg.async_get_entity_id(PLATFORM, DOMAIN, uid):
+                    coordinator.tracked[PLATFORM].add(uid)
+                    continue
+                to_add.append(factory(coordinator, entry, cli))
         if to_add:
             coordinator.tracked[PLATFORM].update(e.unique_id for e in to_add)
             async_add_entities(to_add)
@@ -247,6 +300,92 @@ class _Rtp2httpdStatusEntity(CoordinatorEntity[StatusCoordinator], SensorEntity)
         # 轮询失败时协调器保留最后成功数据；只要最近一次轮询成功即视为可用。
         # （数据非实时时由「服务状态」传感器呈现离线，这里不需要全部变不可用）
         return self.coordinator.last_update_success
+
+
+class Rtp2httpdNowPlayingSensor(_Rtp2httpdStatusEntity):
+    """当前正在播放的频道（取会话时长最长的那个客户端）。
+
+    频道名需要配置「频道名称来源」（一份含 rtp:// 组播地址的原始 M3U）才能反查；
+    未配置时退化为组播地址（如 238.1.78.210:7552），仍然可用于自动化/语音播报。
+    无客户端连接时状态为「未播放」。
+    """
+
+    _attr_icon = "mdi:television-classic"
+
+    def __init__(
+        self, coordinator: StatusCoordinator, entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = _uid(entry.entry_id, "now_playing")
+        self._attr_name = "当前播放频道"
+
+    # ---- 内部 ----
+    def _index(self) -> dict[str, Channel]:
+        return _channel_index(self.coordinator.hass, self._entry)
+
+    def _primary(self) -> ClientStatus | None:
+        clients = list(self.coordinator.data.clients or [])
+        if not clients:
+            return None
+        return max(clients, key=lambda c: (c.duration_ms or 0, c.bandwidth or 0))
+
+    def _compute_native_value(self) -> str:
+        client = self._primary()
+        if client is None:
+            return "未播放"
+        label, _ = _channel_label(self._index(), client.service_url)
+        return label
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        index = self._index()
+        clients = sorted(
+            self.coordinator.data.clients or [],
+            key=lambda c: (c.duration_ms or 0, c.bandwidth or 0),
+            reverse=True,
+        )
+        sessions: list[dict[str, Any]] = []
+        for client in clients:
+            label, channel = _channel_label(index, client.service_url)
+            sessions.append(
+                {
+                    ATTR_CLIENT_ADDR: client.addr,
+                    ATTR_CHANNEL: label,
+                    ATTR_MULTICAST: stream_key(client.service_url),
+                    ATTR_SERVICE_URL: client.service_url,
+                    ATTR_CHANNEL_GROUP: channel.group if channel else None,
+                    ATTR_CHANNEL_TVG_ID: channel.tvg_id if channel else None,
+                    ATTR_CHANNEL_LOGO: channel.logo if channel else None,
+                    ATTR_DURATION: _fmt_duration(client.duration_ms),
+                    ATTR_DURATION_SECONDS: (client.duration_ms or 0) // 1000,
+                    ATTR_BANDWIDTH: round(
+                        (client.bandwidth or 0) * 8 / 1_000_000, 2
+                    ),
+                }
+            )
+        attrs: dict[str, Any] = {
+            "client_count": len(sessions),
+            "sessions": sessions,
+        }
+        if sessions:
+            # 主会话平铺一份，方便模板/语音直接引用
+            primary = sessions[0]
+            for key in (
+                ATTR_CLIENT_ADDR,
+                ATTR_CHANNEL,
+                ATTR_MULTICAST,
+                ATTR_SERVICE_URL,
+                ATTR_DURATION,
+                ATTR_DURATION_SECONDS,
+            ):
+                attrs[key] = primary[key]
+        if not index:
+            attrs["hint"] = (
+                "未配置「频道名称来源」：当前只能显示组播地址。"
+                "在集成选项里填入含 rtp:// 地址的原始 M3U（如 http://192.168.2.2/iptv.m3u）"
+                "即可显示频道名。"
+            )
+        return attrs
 
 
 class Rtp2httpdServiceSensor(_Rtp2httpdStatusEntity):
@@ -483,11 +622,18 @@ class Rtp2httpdClientSensor(_Rtp2httpdStatusEntity):
         client = self._get_client()
         if client is None:
             return {}
-        return {
+        label, channel = _channel_label(
+            _channel_index(self.coordinator.hass, self._entry), client.service_url
+        )
+        attrs: dict[str, Any] = {
+            ATTR_CHANNEL: label,
+            ATTR_MULTICAST: stream_key(client.service_url),
             ATTR_CLIENT_ID: client.client_id,
             ATTR_CLIENT_ADDR: client.addr,
             ATTR_SERVICE_URL: client.service_url,
             ATTR_STATE_CODE: client.state,
+            ATTR_DURATION: _fmt_duration(client.duration_ms),
+            ATTR_DURATION_SECONDS: (client.duration_ms or 0) // 1000,
             ATTR_BYTES_SENT: client.bytes_sent,
             ATTR_BANDWIDTH: client.bandwidth,
             "bandwidth_display": _fmt_bytes(client.bandwidth) + "/s",
@@ -497,6 +643,66 @@ class Rtp2httpdClientSensor(_Rtp2httpdStatusEntity):
             ATTR_DROPPED_BYTES: client.dropped_bytes,
             ATTR_SLOW: client.slow,
         }
+        if channel is not None:
+            attrs[ATTR_CHANNEL_GROUP] = channel.group
+            attrs[ATTR_CHANNEL_LOGO] = channel.logo
+            attrs[ATTR_CHANNEL_TVG_ID] = channel.tvg_id
+        return attrs
 
     def _get_client(self) -> ClientStatus | None:
         return self.coordinator.get_client(self._client_key)
+
+
+class Rtp2httpdClientChannelSensor(_Rtp2httpdStatusEntity):
+    """单个客户端正在播放的频道（随客户端连入/断开自动增删）。"""
+
+    _attr_icon = "mdi:television-guide"
+
+    def __init__(
+        self,
+        coordinator: StatusCoordinator,
+        entry: ConfigEntry,
+        client: ClientStatus,
+    ) -> None:
+        self._client_key = client.key
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{_client_uid(entry.entry_id, client.key)}_ch"
+        self._attr_name = f"客户端 {client.addr or client.client_id} 频道"
+
+    def _get_client(self) -> ClientStatus | None:
+        return self.coordinator.get_client(self._client_key)
+
+    def _compute_native_value(self) -> str:
+        client = self._get_client()
+        if client is None:
+            return "已断开"
+        label, _ = _channel_label(
+            _channel_index(self.coordinator.hass, self._entry), client.service_url
+        )
+        return label
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        client = self._get_client()
+        if client is None:
+            return {}
+        channel = lookup_channel(
+            _channel_index(self.coordinator.hass, self._entry), client.service_url
+        )
+        attrs: dict[str, Any] = {
+            ATTR_CLIENT_ADDR: client.addr,
+            ATTR_MULTICAST: stream_key(client.service_url),
+            ATTR_SERVICE_URL: client.service_url,
+            ATTR_DURATION: _fmt_duration(client.duration_ms),
+            ATTR_PLAYING_SECONDS: (client.duration_ms or 0) // 1000,
+        }
+        if channel is not None:
+            attrs.update(
+                {
+                    ATTR_CHANNEL: channel.name,
+                    ATTR_CHANNEL_GROUP: channel.group,
+                    ATTR_CHANNEL_LOGO: channel.logo,
+                    ATTR_CHANNEL_TVG_ID: channel.tvg_id,
+                }
+            )
+        return attrs

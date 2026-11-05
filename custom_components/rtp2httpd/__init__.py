@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant
 
 from .config_flow import default_playlist_url, default_status_url
 from .const import (
+    CONF_CHANNEL_MAP_URL,
     CONF_CREATE_CAMERAS,
     CONF_CREATE_MEDIA_PLAYERS,
     CONF_PLAYLIST_URL,
@@ -85,10 +86,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         await channel_coordinator.async_refresh()
 
+    # 频道名称协调器（把播放中的 /rtp/<组播> 反查成频道名；仅配置了来源才创建）
+    channel_names: Rtp2httpdCoordinator | None = None
+    map_url = (options.get(CONF_CHANNEL_MAP_URL) or "").strip()
+    if map_url:
+        channel_names = Rtp2httpdCoordinator(hass, map_url, None, token)
+        await channel_names.async_refresh()
+        if channel_names.last_update_success:
+            _LOGGER.info(
+                "频道名称来源已加载：%s（%d 个频道）", map_url, len(channel_names.data)
+            )
+        else:
+            _LOGGER.warning(
+                "频道名称来源拉取失败（播放状态将只显示组播地址）：%s", map_url
+            )
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "status": status_coordinator,
         "channels": channel_coordinator,
+        "channel_names": channel_names,
     }
+    # 选项变更后自动重载（否则新选项要等重启才生效）
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     platforms = _enabled_platforms(entry)
     await hass.config_entries.async_forward_entry_setups(entry, platforms)
     _LOGGER.info(
@@ -108,6 +127,11 @@ def _channel_platforms_enabled(entry: ConfigEntry) -> bool:
         options.get(CONF_CREATE_MEDIA_PLAYERS, DEFAULT_CREATE_MEDIA_PLAYERS)
         or options.get(CONF_CREATE_CAMERAS, DEFAULT_CREATE_CAMERAS)
     )
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """选项保存后重载集成，让新配置立即生效。"""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

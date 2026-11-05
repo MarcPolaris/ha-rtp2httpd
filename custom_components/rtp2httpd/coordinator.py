@@ -14,7 +14,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import DOMAIN
-from .m3u import Channel, parse_playlist
+from .m3u import Channel, build_channel_index, parse_playlist
 from .status import ServerStatus, fetch_status
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,25 +45,30 @@ class Rtp2httpdCoordinator(DataUpdateCoordinator[list[Channel]]):
         self,
         hass: HomeAssistant,
         playlist_url: str,
-        refresh_interval: int,
+        refresh_interval: int | None,
         token: str | None = None,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_channels",
-            update_interval=timedelta(seconds=refresh_interval),
+            update_interval=(
+                timedelta(seconds=refresh_interval) if refresh_interval else None
+            ),
         )
         self.playlist_url = playlist_url
         self.token = token
         self.data: list[Channel] = []
+        self._index: dict[str, Channel] = {}
         # 平台名 -> 已跟踪 key / 已创建实体（刷新时增量增删）
         self.tracked: dict[str, set[str]] = {}
         self.entities: dict[str, list] = {}
 
     async def _async_update_data(self) -> list[Channel]:
         try:
-            return await fetch_channels(self.hass, self.playlist_url, self.token)
+            channels = await fetch_channels(
+                self.hass, self.playlist_url, self.token
+            )
         except PermissionError as err:
             raise UpdateFailed(f"鉴权失败: {err}") from err
         except ConnectionError as err:
@@ -72,6 +77,16 @@ class Rtp2httpdCoordinator(DataUpdateCoordinator[list[Channel]]):
             raise UpdateFailed(str(err)) from err
         except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"获取频道列表失败: {err}") from err
+        # 顺带刷新「流地址 -> 频道」索引（用于把播放中的组播地址解析成频道名）
+        self._index = build_channel_index(channels)
+        return channels
+
+    @property
+    def index(self) -> dict[str, Channel]:
+        """「流地址 / 路径 -> 频道」索引；频道列表刷新后自动更新。"""
+        if not self._index and self.data:
+            self._index = build_channel_index(self.data)
+        return self._index
 
     def get_channel(self, key: str) -> Channel | None:
         for ch in self.data or []:

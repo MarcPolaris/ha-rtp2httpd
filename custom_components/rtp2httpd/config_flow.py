@@ -20,6 +20,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_CHANNELS,
+    CONF_CHANNEL_MAP_URL,
     CONF_CREATE_CAMERAS,
     CONF_CREATE_MEDIA_PLAYERS,
     CONF_PLAYLIST_URL,
@@ -240,6 +241,10 @@ class Rtp2httpdOptionsFlow(OptionsFlow):
                     CONF_USE_SNAPSHOT,
                     default=val(CONF_USE_SNAPSHOT, DEFAULT_USE_SNAPSHOT),
                 ): bool,
+                vol.Optional(
+                    CONF_CHANNEL_MAP_URL,
+                    default=val(CONF_CHANNEL_MAP_URL, ""),
+                ): str,
                 vol.Optional("reselect_channels", default=False): bool,
             }
         )
