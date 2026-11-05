@@ -96,8 +96,27 @@ class ClientStatus:
 
     @property
     def key(self) -> str:
-        """客户端实体唯一 key。"""
+        """会话唯一 key（含端口与序号，每次连接都不同）。"""
         return self.client_id
+
+    @property
+    def ip(self) -> str:
+        """客户端 IP（去掉端口）。
+
+        实体按 IP 聚合：回看/HLS 每片一个连接、端口每次都变，
+        按连接建实体会导致实体不断新建删除。
+        """
+        addr = (self.addr or "").strip()
+        if addr.count(":") == 1:  # IPv4:port
+            return addr.split(":", 1)[0]
+        return addr or self.client_id
+
+    @property
+    def is_http_stream(self) -> bool:
+        """是否是 HTTP 反代流（回看/HLS），这类流没有组播地址。"""
+        return (self.service_url or "").strip().lower().startswith(
+            ("http://", "https://")
+        )
 
 
 @dataclass

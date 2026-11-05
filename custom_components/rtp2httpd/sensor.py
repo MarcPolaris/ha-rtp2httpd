@@ -6,7 +6,10 @@
 - 在线客户端数 / 当前总带宽 / 累计发送字节
 
 动态传感器（随客户端连入/断开自动增删）：
-- 每个客户端两个：连接状态（属性含频道/组播地址/时长/流量/队列/丢包）、正在播放的频道
+- 每个**客户端 IP** 两个：连接状态（属性含频道/组播地址/时长/流量/队列/丢包、
+  以及该 IP 全部会话明细 sessions）、正在播放的频道
+- 按 IP 聚合而非按连接：回看/HLS 每片一个连接、端口每次都变，
+  按连接建实体（`IP:端口`）会导致实体每十几秒增删一次
 
 不再提供全局「当前播放频道」：多客户端时无法用一个值准确表达，
 各客户端的频道看「客户端 <IP> 频道」即可。
@@ -170,15 +173,37 @@ def _channel_index(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Channel
 
 
 def _channel_label(index: dict[str, Channel], service_url: str) -> tuple[str, Channel | None]:
-    """播放地址 -> (可读名称, 频道对象)。查不到频道时退化为组播地址。"""
+    """播放地址 -> (可读名称, 频道对象)。
+
+    依次尝试：频道索引反查 → 组播地址 → HTTP 反代（回看/HLS）显示「回看」
+    → 路径末段。绝不把整条 URL 当名称（会变成一长串实体名）。
+    """
     channel = lookup_channel(index, service_url)
     if channel is not None:
         return channel.name, channel
     multicast = stream_key(service_url)
     if multicast:
         return multicast, None
-    cleaned = (service_url or "").split("?", 1)[0] or "未知"
-    return cleaned, None
+    url = (service_url or "").strip()
+    if url.lower().startswith(("http://", "https://")):
+        return "回看", None
+    tail = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    return tail or "未知", None
+
+
+def _group_by_ip(clients: list[ClientStatus]) -> dict[str, list[ClientStatus]]:
+    """把会话按客户端 IP 归并（同一 IP 的多条流算一个设备）。"""
+    grouped: dict[str, list[ClientStatus]] = {}
+    for cli in clients:
+        grouped.setdefault(cli.ip, []).append(cli)
+    return grouped
+
+
+def _primary(clients: list[ClientStatus]) -> ClientStatus | None:
+    """同一 IP 下的主会话（播放最久，其次带宽最大）。"""
+    if not clients:
+        return None
+    return max(clients, key=lambda c: (c.duration_ms or 0, c.bandwidth or 0))
 
 
 async def async_setup_entry(
@@ -207,22 +232,22 @@ async def async_setup_entry(
     _LOGGER.info("sensor 平台装载：%d 个静态传感器", len(static_entities))
 
     def _refresh() -> None:
-        """客户端连入/断开时增量增删动态传感器（断开即连注册条目一起清理）。"""
+        """客户端连入/断开时增量增删动态传感器（按 IP 聚合，断开即连注册条目一起清理）。"""
         reg = async_get_entity_registry(hass)
-        clients = {cli.key: cli for cli in coordinator.data.clients}
+        groups = _group_by_ip(list(coordinator.data.clients))
         # 移除已断开的客户端：必须同时删除注册表条目，否则设备页残留"不可用"
         for ent in list(coordinator.entities[PLATFORM]):
             if getattr(ent, "_client_key", None) is None:
                 continue
-            if ent._client_key not in clients:  # noqa: SLF001
+            if ent._client_key not in groups:  # noqa: SLF001
                 coordinator.tracked[PLATFORM].discard(ent.unique_id)
                 reg.async_remove(ent.entity_id)
                 hass.async_create_task(ent.async_remove())
                 coordinator.entities[PLATFORM].remove(ent)
-        # 新增客户端：状态传感器 + 频道传感器
+        # 新增客户端：一个 IP 一套（状态传感器 + 频道传感器）
         to_add = []
-        for key, cli in clients.items():
-            base_uid = _client_uid(entry.entry_id, key)
+        for ip, clients in groups.items():
+            base_uid = _client_uid(entry.entry_id, ip)
             for uid, factory in (
                 (base_uid, Rtp2httpdClientSensor),
                 (f"{base_uid}_ch", Rtp2httpdClientChannelSensor),
@@ -232,7 +257,7 @@ async def async_setup_entry(
                 if reg.async_get_entity_id(PLATFORM, DOMAIN, uid):
                     coordinator.tracked[PLATFORM].add(uid)
                     continue
-                to_add.append(factory(coordinator, entry, cli))
+                to_add.append(factory(coordinator, entry, ip, clients))
         if to_add:
             coordinator.tracked[PLATFORM].update(e.unique_id for e in to_add)
             async_add_entities(to_add)
@@ -507,57 +532,89 @@ class Rtp2httpdBytesSensor(_Rtp2httpdStatusEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"display": _fmt_bytes(self.coordinator.data.total_bytes)}
 
-
 class Rtp2httpdClientSensor(_Rtp2httpdStatusEntity):
-    """单个客户端连接状态（动态创建/删除）。"""
+    """单个客户端 IP 的连接状态（动态创建/删除）。
+
+    按 IP 聚合：回看/HLS 每片一个连接、端口每次都变，按连接建实体
+    会让实体不停新建删除，因此同一 IP 的多条会话合并为一个实体，
+    多条流的明细放在属性 sessions 里。
+    """
 
     def __init__(
         self,
         coordinator: StatusCoordinator,
         entry: ConfigEntry,
-        client: ClientStatus,
+        ip: str,
+        clients: list[ClientStatus],
     ) -> None:
-        self._client_key = client.key
+        self._client_key = ip
         super().__init__(coordinator, entry)
-        self._attr_unique_id = _client_uid(entry.entry_id, client.key)
-        self._attr_name = f"客户端 {client.addr or client.client_id}"
+        self._attr_unique_id = _client_uid(entry.entry_id, ip)
+        self._attr_name = f"客户端 {ip}"
+
+    def _get_clients(self) -> list[ClientStatus]:
+        return self.coordinator.get_clients_by_ip(self._client_key)
 
     def _compute_native_value(self) -> str:
-        client = self._get_client()
-        return client.state_name if client else "已断开"
+        clients = self._get_clients()
+        if not clients:
+            return "已断开"
+        if len(clients) > 1:
+            return f"{len(clients)} 个流"
+        return clients[0].state_name
 
     @property
     def icon(self) -> str:
-        client = self._get_client()
-        if client is None:
+        clients = self._get_clients()
+        if not clients:
             return "mdi:lan-disconnect"
-        return _STATE_ICONS.get(client.state_name, "mdi:lan-connect")
+        if len(clients) > 1:
+            return "mdi:lan-multiple"
+        return _STATE_ICONS.get(clients[0].state_name, "mdi:lan-connect")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        client = self._get_client()
-        if client is None:
+        clients = self._get_clients()
+        if not clients:
             return {}
-        label, channel = _channel_label(
-            _channel_index(self.coordinator.hass, self._entry), client.service_url
-        )
+        index = _channel_index(self.coordinator.hass, self._entry)
+        main = _primary(clients) or clients[0]
+        label, channel = _channel_label(index, main.service_url)
         attrs: dict[str, Any] = {
+            "client_count": len(clients),
             ATTR_CHANNEL: label,
-            ATTR_MULTICAST: stream_key(client.service_url),
-            ATTR_CLIENT_ID: client.client_id,
-            ATTR_CLIENT_ADDR: client.addr,
-            ATTR_SERVICE_URL: client.service_url,
-            ATTR_STATE_CODE: client.state,
-            ATTR_DURATION: _fmt_duration(client.duration_ms),
-            ATTR_DURATION_SECONDS: (client.duration_ms or 0) // 1000,
-            ATTR_BYTES_SENT: client.bytes_sent,
-            ATTR_BANDWIDTH: client.bandwidth,
-            "bandwidth_display": _fmt_bytes(client.bandwidth) + "/s",
-            ATTR_QUEUE_BYTES: client.queue_bytes,
-            ATTR_QUEUE_LIMIT: client.queue_limit,
-            ATTR_QUEUE_HIGHWATER: client.queue_highwater,
-            ATTR_DROPPED_BYTES: client.dropped_bytes,
-            ATTR_SLOW: client.slow,
+            ATTR_MULTICAST: stream_key(main.service_url),
+            ATTR_CLIENT_ID: main.client_id,
+            ATTR_CLIENT_ADDR: main.addr,
+            ATTR_SERVICE_URL: main.service_url,
+            ATTR_STATE_CODE: main.state,
+            ATTR_DURATION: _fmt_duration(main.duration_ms),
+            ATTR_DURATION_SECONDS: (main.duration_ms or 0) // 1000,
+            ATTR_BYTES_SENT: main.bytes_sent,
+            ATTR_BANDWIDTH: main.bandwidth,
+            "bandwidth_display": _fmt_bytes(main.bandwidth) + "/s",
+            ATTR_QUEUE_BYTES: main.queue_bytes,
+            ATTR_QUEUE_LIMIT: main.queue_limit,
+            ATTR_QUEUE_HIGHWATER: main.queue_highwater,
+            ATTR_DROPPED_BYTES: main.dropped_bytes,
+            ATTR_SLOW: main.slow,
+            "total_bytes_sent": sum(c.bytes_sent for c in clients),
+            "total_bandwidth": sum(c.bandwidth for c in clients),
+            "sessions": [
+                {
+                    ATTR_CLIENT_ID: c.client_id,
+                    ATTR_CLIENT_ADDR: c.addr,
+                    ATTR_STATE_CODE: c.state,
+                    "state": c.state_name,
+                    ATTR_CHANNEL: _channel_label(index, c.service_url)[0],
+                    ATTR_MULTICAST: stream_key(c.service_url),
+                    ATTR_SERVICE_URL: c.service_url,
+                    ATTR_DURATION: _fmt_duration(c.duration_ms),
+                    ATTR_BANDWIDTH: c.bandwidth,
+                    ATTR_BYTES_SENT: c.bytes_sent,
+                }
+                for c in clients
+            ],
         }
         if channel is not None:
             attrs[ATTR_CHANNEL_GROUP] = channel.group
@@ -565,12 +622,9 @@ class Rtp2httpdClientSensor(_Rtp2httpdStatusEntity):
             attrs[ATTR_CHANNEL_TVG_ID] = channel.tvg_id
         return attrs
 
-    def _get_client(self) -> ClientStatus | None:
-        return self.coordinator.get_client(self._client_key)
-
 
 class Rtp2httpdClientChannelSensor(_Rtp2httpdStatusEntity):
-    """单个客户端正在播放的频道（随客户端连入/断开自动增删）。"""
+    """单个客户端 IP 正在播放的频道（随客户端连入/断开自动增删）。"""
 
     _attr_icon = "mdi:television-guide"
 
@@ -578,39 +632,52 @@ class Rtp2httpdClientChannelSensor(_Rtp2httpdStatusEntity):
         self,
         coordinator: StatusCoordinator,
         entry: ConfigEntry,
-        client: ClientStatus,
+        ip: str,
+        clients: list[ClientStatus],
     ) -> None:
-        self._client_key = client.key
+        self._client_key = ip
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{_client_uid(entry.entry_id, client.key)}_ch"
-        self._attr_name = f"客户端 {client.addr or client.client_id} 频道"
+        self._attr_unique_id = f"{_client_uid(entry.entry_id, ip)}_ch"
+        self._attr_name = f"客户端 {ip} 频道"
 
-    def _get_client(self) -> ClientStatus | None:
-        return self.coordinator.get_client(self._client_key)
+    def _get_clients(self) -> list[ClientStatus]:
+        return self.coordinator.get_clients_by_ip(self._client_key)
 
     def _compute_native_value(self) -> str:
-        client = self._get_client()
-        if client is None:
+        clients = self._get_clients()
+        if not clients:
             return "已断开"
-        label, _ = _channel_label(
-            _channel_index(self.coordinator.hass, self._entry), client.service_url
-        )
-        return label
+        index = _channel_index(self.coordinator.hass, self._entry)
+        labels = list(dict.fromkeys(
+            _channel_label(index, c.service_url)[0] for c in clients
+        ))
+        if len(labels) == 1:
+            return labels[0]
+        return f"{len(clients)} 个流"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        client = self._get_client()
-        if client is None:
+        clients = self._get_clients()
+        if not clients:
             return {}
-        channel = lookup_channel(
-            _channel_index(self.coordinator.hass, self._entry), client.service_url
-        )
+        index = _channel_index(self.coordinator.hass, self._entry)
+        main = _primary(clients) or clients[0]
+        channel = lookup_channel(index, main.service_url)
         attrs: dict[str, Any] = {
-            ATTR_CLIENT_ADDR: client.addr,
-            ATTR_MULTICAST: stream_key(client.service_url),
-            ATTR_SERVICE_URL: client.service_url,
-            ATTR_DURATION: _fmt_duration(client.duration_ms),
-            ATTR_PLAYING_SECONDS: (client.duration_ms or 0) // 1000,
+            "client_count": len(clients),
+            ATTR_CLIENT_ADDR: main.addr,
+            ATTR_MULTICAST: stream_key(main.service_url),
+            ATTR_SERVICE_URL: main.service_url,
+            ATTR_DURATION: _fmt_duration(main.duration_ms),
+            ATTR_PLAYING_SECONDS: (main.duration_ms or 0) // 1000,
+            "sessions": [
+                {
+                    ATTR_CHANNEL: _channel_label(index, c.service_url)[0],
+                    ATTR_SERVICE_URL: c.service_url,
+                    ATTR_DURATION: _fmt_duration(c.duration_ms),
+                }
+                for c in clients
+            ],
         }
         if channel is not None:
             attrs.update(

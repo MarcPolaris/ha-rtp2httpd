@@ -153,3 +153,7 @@ class StatusCoordinator(DataUpdateCoordinator[ServerStatus]):
             if cli.key == key:
                 return cli
         return None
+
+    def get_clients_by_ip(self, ip: str) -> list:
+        """某个 IP 当前的全部会话（一个 IP 可能同时有多条流）。"""
+        return [cli for cli in self.data.clients if cli.ip == ip]

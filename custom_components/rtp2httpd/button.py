@@ -25,7 +25,6 @@ from .const import DOMAIN
 from .coordinator import StatusCoordinator
 from .registry_utils import purge_client_entities
 from .status import (
-    ClientStatus,
     clear_logs,
     disconnect_client,
     reload_config,
@@ -67,26 +66,24 @@ async def async_setup_entry(
 
     def _refresh() -> None:
         reg = async_get_entity_registry(hass)
-        clients = {cli.key for cli in coordinator.data.clients}
+        ips = {cli.ip for cli in coordinator.data.clients}
         # 断开的客户端按钮连同注册条目一起删除，设备页不残留"不可用"
         for ent in list(coordinator.entities[PLATFORM]):
-            if isinstance(ent, Rtp2httpdClientDisconnectButton) and ent._client_key not in clients:  # noqa: SLF001
+            if isinstance(ent, Rtp2httpdClientDisconnectButton) and ent._client_key not in ips:  # noqa: SLF001
                 coordinator.tracked[PLATFORM].discard(ent.unique_id)
                 reg.async_remove(ent.entity_id)
                 hass.async_create_task(ent.async_remove())
                 coordinator.entities[PLATFORM].remove(ent)
 
         to_add = []
-        for key in clients:
-            uid = _client_uid(entry.entry_id, key)
+        for ip in ips:
+            uid = _client_uid(entry.entry_id, ip)
             if uid in coordinator.tracked[PLATFORM]:
                 continue
             if reg.async_get_entity_id(PLATFORM, DOMAIN, uid):
                 coordinator.tracked[PLATFORM].add(uid)
                 continue
-            client = coordinator.get_client(key)
-            if client is not None:
-                to_add.append(Rtp2httpdClientDisconnectButton(coordinator, entry, client))
+            to_add.append(Rtp2httpdClientDisconnectButton(coordinator, entry, ip))
         if to_add:
             coordinator.tracked[PLATFORM].update(e.unique_id for e in to_add)
             async_add_entities(to_add)
@@ -190,7 +187,7 @@ class Rtp2httpdClearLogsButton(_Rtp2httpdButton):
 
 
 class Rtp2httpdClientDisconnectButton(_Rtp2httpdButton):
-    """强制断开某个客户端（动态创建/删除；同时封禁其 IP 5 秒）。"""
+    """强制断开某个客户端 IP 的全部连接（动态创建/删除；同时封禁其 IP 5 秒）。"""
 
     _attr_icon = "mdi:lan-disconnect"
 
@@ -198,23 +195,32 @@ class Rtp2httpdClientDisconnectButton(_Rtp2httpdButton):
         self,
         coordinator: StatusCoordinator,
         entry: ConfigEntry,
-        client: ClientStatus,
+        ip: str,
     ) -> None:
         super().__init__(coordinator, entry)
-        self._client_key = client.key
-        self._client_id = client.client_id
-        self._addr = client.addr
-        self._attr_unique_id = _client_uid(entry.entry_id, client.key)
-        self._attr_name = f"断开 {client.addr or client.client_id}"
+        self._client_key = ip
+        self._attr_unique_id = _client_uid(entry.entry_id, ip)
+        self._attr_name = f"断开 {ip}"
 
     async def async_press(self) -> None:
-        ok = await disconnect_client(
-            self.hass,
-            self.coordinator.host,
-            self.coordinator.port,
-            self.coordinator.token,
-            self._client_id,
-        )
+        clients = self.coordinator.get_clients_by_ip(self._client_key)
+        if not clients:
+            await self.coordinator.async_request_refresh()
+            return
+        ok = False
+        for cli in clients:
+            ok = (
+                await disconnect_client(
+                    self.hass,
+                    self.coordinator.host,
+                    self.coordinator.port,
+                    self.coordinator.token,
+                    cli.client_id,
+                )
+                or ok
+            )
         if ok:
-            _LOGGER.info("已请求断开客户端 %s", self._client_id)
+            _LOGGER.info(
+                "已请求断开 %s 的 %d 个连接", self._client_key, len(clients)
+            )
             await self.coordinator.async_request_refresh()
