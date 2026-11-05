@@ -303,11 +303,14 @@ class _Rtp2httpdStatusEntity(CoordinatorEntity[StatusCoordinator], SensorEntity)
 
 
 class Rtp2httpdNowPlayingSensor(_Rtp2httpdStatusEntity):
-    """当前正在播放的频道（取会话时长最长的那个客户端）。
+    """当前正在播放的频道。
 
-    频道名需要配置「频道名称来源」（一份含 rtp:// 组播地址的原始 M3U）才能反查；
-    未配置时退化为组播地址（如 238.1.78.210:7552），仍然可用于自动化/语音播报。
-    无客户端连接时状态为「未播放」。
+    状态语义（避免多客户端时误导）：
+    - 无人播放       -> `未播放`
+    - 只有 1 个客户端 -> 频道名，如 `枞阳电视台`（查不到台名时显示组播地址）
+    - 多个客户端     -> `同时播放 N 个频道`，具体台名看属性 `sessions`
+
+    频道名需要配置「频道名称来源」（含 rtp:// 组播地址的原始 M3U）才能反查。
     """
 
     _attr_icon = "mdi:television-classic"
@@ -323,17 +326,14 @@ class Rtp2httpdNowPlayingSensor(_Rtp2httpdStatusEntity):
     def _index(self) -> dict[str, Channel]:
         return _channel_index(self.coordinator.hass, self._entry)
 
-    def _primary(self) -> ClientStatus | None:
+    def _compute_native_value(self) -> str:
         clients = list(self.coordinator.data.clients or [])
         if not clients:
-            return None
-        return max(clients, key=lambda c: (c.duration_ms or 0, c.bandwidth or 0))
-
-    def _compute_native_value(self) -> str:
-        client = self._primary()
-        if client is None:
             return "未播放"
-        label, _ = _channel_label(self._index(), client.service_url)
+        # 多客户端时不给单一频道名，避免误导（明细看属性里的 sessions）
+        if len(clients) > 1:
+            return f"同时播放 {len(clients)} 个频道"
+        label, _ = _channel_label(self._index(), clients[0].service_url)
         return label
 
     @property

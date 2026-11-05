@@ -87,15 +87,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await channel_coordinator.async_refresh()
 
     # 频道名称协调器（把播放中的 /rtp/<组播> 反查成频道名；仅配置了来源才创建）
+    # 只在启动时拉取一次（映射表存内存），改完 M3U 后在选项里保存即可重建，不做后台轮询。
     channel_names: Rtp2httpdCoordinator | None = None
     map_url = (options.get(CONF_CHANNEL_MAP_URL) or "").strip()
     if map_url:
-        channel_names = Rtp2httpdCoordinator(
-            hass,
-            map_url,
-            options.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL),
-            token,
-        )
+        channel_names = Rtp2httpdCoordinator(hass, map_url, None, token)
         await channel_names.async_refresh()
         if channel_names.last_update_success:
             _LOGGER.info(
